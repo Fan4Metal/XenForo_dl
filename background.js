@@ -1,13 +1,18 @@
 // Фоновый service worker: хранит результаты сканирования и ведёт очередь загрузок.
 // Состояние задания лежит в chrome.storage.session, чтобы пережить перезапуск воркера.
 
+importScripts('filter.js');
+
 const MAX_ATTEMPTS = 3;
-const IMG_EXT = /\.(jpe?g|jfif|png|gif|webp|avif|bmp|tiff?|heic|svg|ico)$/i;
+const MEDIA_EXT = /\.(jpe?g|jfif|png|gif|webp|avif|bmp|tiff?|heic|svg|ico|mp4|m4v|webm|mov|mkv|avi|wmv|flv|mpe?g|3gp|ogv)$/i;
 const GENERIC_STEM = /^(proxy|index|download|attachment|attachments|image|file|unknown|untitled|\d+)$/i;
 const MIME_EXT = {
   'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/pjpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif',
   'image/webp': 'webp', 'image/avif': 'avif', 'image/bmp': 'bmp', 'image/svg+xml': 'svg',
   'image/tiff': 'tif', 'image/heic': 'heic', 'image/x-icon': 'ico', 'image/vnd.microsoft.icon': 'ico',
+  'video/mp4': 'mp4', 'video/x-m4v': 'm4v', 'video/webm': 'webm', 'video/quicktime': 'mov',
+  'video/x-matroska': 'mkv', 'video/x-msvideo': 'avi', 'video/x-ms-wmv': 'wmv', 'video/x-flv': 'flv',
+  'video/mpeg': 'mpg', 'video/3gpp': '3gp', 'video/ogg': 'ogv',
 };
 
 let job = null;      // кэш состояния задания
@@ -31,18 +36,43 @@ async function getJob() {
 
 const saveJob = () => chrome.storage.session.set({ job });
 
-// После перезапуска воркера сверяем "активные" элементы с реальным состоянием загрузок.
+// Ошибки, которые повтор не исправит: отмена, проблемы с диском, 401/403/404 и т.п.
+const isPermanentError = (err) =>
+  /^(USER_CANCELED|FILE_|SERVER_(BAD_CONTENT|FORBIDDEN|UNAUTHORIZED|CERT_PROBLEM|CROSS_ORIGIN_REDIRECT))/.test(err);
+
+// Итог прерванной загрузки: повторить или записать ошибку.
+function settleInterrupted(it, err) {
+  if (it.notImage) {
+    it.status = 'failed';
+    it.error = 'Сервер вернул HTML вместо изображения (нужен вход или доступ запрещён)';
+  } else if (isPermanentError(err) || it.attempts >= MAX_ATTEMPTS) {
+    it.status = 'failed';
+    it.error = err;
+  } else {
+    it.status = 'pending';
+  }
+}
+
+// Сверяем "активные" элементы с реальным состоянием загрузок. Нужно после перезапуска
+// воркера: события, пришедшие пока он был выгружен или падал, могли потеряться.
 async function reconcile(j) {
   for (const it of j.items) {
-    if (it.status !== 'active' || it.downloadId == null) continue;
-    const [d] = await chrome.downloads.search({ id: it.downloadId });
-    if (!d) it.status = 'pending';
-    else if (d.state === 'complete') it.status = 'done';
-    else if (d.state === 'interrupted') {
-      it.status = it.attempts < MAX_ATTEMPTS ? 'pending' : 'failed';
-      it.error = d.error || 'INTERRUPTED';
-    }
+    if (it.status !== 'active') continue;
+    let d = null;
+    if (it.downloadId != null) [d] = await chrome.downloads.search({ id: it.downloadId });
+    else [d] = await chrome.downloads.search({ url: it.url, orderBy: ['-startTime'], limit: 1 });
+    if (!d) { it.status = 'pending'; continue; }
+    it.downloadId = d.id;
+    if (d.state === 'complete') { it.status = 'done'; j.lastDoneId = d.id; }
+    else if (d.state === 'interrupted') settleInterrupted(it, d.error || 'INTERRUPTED');
   }
+}
+
+// Сторож: пока идёт загрузка, раз в 30 с будит воркер и продвигает очередь.
+const WATCHDOG = 'xfdl-watchdog';
+function setWatchdog(on) {
+  if (on) chrome.alarms.create(WATCHDOG, { periodInMinutes: 0.5 });
+  else chrome.alarms.clear(WATCHDOG);
 }
 
 function setDownloadUi(enabled) {
@@ -78,13 +108,13 @@ function sanitizePath(p) {
 const basename = (p) => String(p || '').split(/[\\/]/).pop();
 const stem = (n) => n.replace(/\.[^.]+$/, '');
 
-const EXT_ALIASES = { jpg: ['jpg', 'jpeg', 'jpe'], tif: ['tif', 'tiff'] };
+const EXT_ALIASES = { jpg: ['jpg', 'jpeg', 'jpe'], tif: ['tif', 'tiff'], mp4: ['mp4', 'm4v'], mpg: ['mpg', 'mpeg'] };
 
 // Приводим расширение к реальному типу файла: иначе Chrome сам подставит своё (например, .jfif для JPEG).
-function fixExt(name, mime) {
+function fixExt(name, mime, fallback = 'jpg') {
   const want = MIME_EXT[(mime || '').toLowerCase()];
-  const ext = IMG_EXT.test(name) ? name.split('.').pop().toLowerCase() : null;
-  if (!want) return ext === 'jfif' ? `${stem(name)}.jpg` : ext ? name : `${name}.jpg`;
+  const ext = MEDIA_EXT.test(name) ? name.split('.').pop().toLowerCase() : null;
+  if (!want) return ext === 'jfif' ? `${stem(name)}.jpg` : ext ? name : `${name}.${fallback}`;
   if (ext && (EXT_ALIASES[want] || [want]).includes(ext)) return name;
   return `${ext ? stem(name) : name}.${want}`;
 }
@@ -92,10 +122,10 @@ function fixExt(name, mime) {
 function chooseName(it, item) {
   const server = basename(item.filename);
   let name;
-  if (server && IMG_EXT.test(server) && !GENERIC_STEM.test(stem(server))) name = server;
-  else if (it.name && IMG_EXT.test(it.name)) name = it.name;
+  if (server && MEDIA_EXT.test(server) && !GENERIC_STEM.test(stem(server))) name = server;
+  else if (it.name && MEDIA_EXT.test(it.name)) name = it.name;
   else name = it.name || (server && stem(server)) || 'image';
-  return fixExt(name, item.mime);
+  return fixExt(name, item.mime, it.type === 'video' ? 'mp4' : 'jpg');
 }
 
 // ---------- очередь ----------
@@ -126,6 +156,7 @@ async function pump() {
     }
   }
   if (j.state !== 'running' && j.hideUi) setDownloadUi(true);
+  setWatchdog(j.state === 'running');
   await saveJob();
 }
 
@@ -141,11 +172,8 @@ async function startJob(tabId, opts) {
   const { [`scan:${tabId}`]: scan } = await chrome.storage.session.get(`scan:${tabId}`);
   if (!scan || !scan.result) return { ok: false, error: 'Сначала просканируйте тред.' };
 
-  const images = scan.result.images.filter((img) =>
-    (img.kind === 'attachment' ? opts.incAttach : opts.incEmbed) &&
-    (opts.incQuotes || !img.quote) &&
-    (opts.incSigs || !img.sig));
-  if (!images.length) return { ok: false, error: 'Нет изображений для загрузки с текущими фильтрами.' };
+  const images = scan.result.images.filter((img) => xfdlPasses(img, opts));
+  if (!images.length) return { ok: false, error: 'Нет файлов для загрузки с текущими фильтрами.' };
 
   const title = sanitize(scan.meta.title, 80) || 'thread';
   const thread = scan.meta.threadId ? `${title} [${scan.meta.threadId}]` : title;
@@ -167,6 +195,7 @@ async function startJob(tabId, opts) {
       idx: i + 1,
       url: opts.preferOriginal && img.orig ? img.orig : img.url,
       name: img.name,
+      type: img.type || 'image',
       page: img.page,
       status: 'pending',
       attempts: 0,
@@ -259,18 +288,18 @@ chrome.downloads.onChanged.addListener((delta) => {
       if (j.eraseHistory) chrome.downloads.erase({ id: delta.id }).catch(() => {});
     } else {
       const [d] = await chrome.downloads.search({ id: delta.id });
-      const err = (d && d.error) || 'INTERRUPTED';
-      if (it.notImage) {
-        it.status = 'failed';
-        it.error = 'Сервер вернул HTML вместо изображения (нужен вход или доступ запрещён)';
-      } else if (err === 'USER_CANCELED' || err.startsWith('FILE_') || it.attempts >= MAX_ATTEMPTS) {
-        it.status = 'failed';
-        it.error = err;
-      } else {
-        it.status = 'pending'; // повторим
-      }
-      chrome.downloads.erase({ id: delta.id }).catch(() => {});
+      settleInterrupted(it, (d && d.error) || 'INTERRUPTED');
     }
+    await pump();
+  });
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== WATCHDOG) return;
+  serial(async () => {
+    const j = await getJob();
+    if (!j || j.state !== 'running') return setWatchdog(false);
+    await reconcile(j);
     await pump();
   });
 });
@@ -288,7 +317,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg && msg.type) {
     case 'xfdl:scan-progress':
       serial(() => setScan(tabId, {
-        status: 'scanning', meta: msg.meta, done: msg.done, total: msg.total, found: msg.found, result: null, error: null,
+        status: 'scanning', phase: msg.phase, meta: msg.meta, done: msg.done, total: msg.total, found: msg.found, result: null, error: null,
       }));
       return false;
     case 'xfdl:scan-done':
@@ -305,6 +334,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
     case 'xfdl:retry':
       serial(retryFailed).then(() => sendResponse({ ok: true }));
+      return true;
+    case 'xfdl:ping': // popup будит воркер: при старте он сам продолжит прерванное задание
+      serial(getJob).then(() => sendResponse({ ok: true }));
       return true;
     case 'xfdl:clear':
       serial(clearJob).then(() => sendResponse({ ok: true }));

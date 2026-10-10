@@ -1,9 +1,12 @@
 // Сканер треда XenForo. Внедряется в страницу из popup через chrome.scripting.
 // Повторное внедрение безопасно: всё API живёт в window.__xfdl.
 (() => {
-  if (window.__xfdl) return;
+  const VERSION = 2;
+  if (window.__xfdl && window.__xfdl.version === VERSION) return;
 
   const IMG_EXT = /\.(jpe?g|jfif|png|gif|webp|avif|bmp|tiff?|heic|svg)$/i;
+  const VIDEO_EXT = /\.(mp4|m4v|webm|mov|mkv|avi|wmv|flv|mpe?g|3gp|ogv)$/i;
+  const MEDIA_SLUG = /-(jpe?g|jfif|png|gif|webp|avif|bmp|tiff?|heic|svg|mp4|m4v|webm|mov|mkv|avi|wmv|flv|mpe?g|3gp|ogv)$/i;
   // Картинки, которые не являются контентом поста.
   const SKIP_IMG = [
     '.smilie', '[data-smilie]', '.emoji', '[data-shortname]', '.avatar', '.reaction',
@@ -13,6 +16,7 @@
   let cancelled = false;
   let running = false;
 
+  const hasMediaExt = (n) => IMG_EXT.test(n) || VIDEO_EXT.test(n);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const send = (msg) => chrome.runtime.sendMessage(msg).catch(() => {});
 
@@ -99,7 +103,7 @@
     if (!m) return null;
     let name = null;
     if (m[1]) {
-      name = decodeURIComponent(m[1]).replace(/-(jpe?g|jfif|png|gif|webp|avif|bmp|tiff?|heic|svg)$/i, '.$1');
+      name = decodeURIComponent(m[1]).replace(MEDIA_SLUG, '.$1');
     }
     return { id: m[2], name };
   }
@@ -126,9 +130,12 @@
     return null;
   }
 
+  const pathOf = (url) => { try { return new URL(url).pathname; } catch { return ''; } };
+  const isVideoUrl = (url) => VIDEO_EXT.test(pathOf(url)) || VIDEO_EXT.test(nameFromUrl(url) || '');
+
   function looksLikeImageLink(href) {
     if (/attachments\/(?:[^/?#&]*\.)?\d+/.test(href)) return true;
-    try { return IMG_EXT.test(new URL(href).pathname); } catch { return false; }
+    return IMG_EXT.test(pathOf(href));
   }
 
   // Лучший (полноразмерный) URL для <img> из тела поста.
@@ -146,6 +153,17 @@
     return absUrl(img.getAttribute('data-src'), base) || absUrl(img.getAttribute('src'), base);
   }
 
+  // URL видеофайла из <video>: сам src или первый <source>.
+  function videoUrl(video, base) {
+    const cands = [video.getAttribute('src'), video.getAttribute('data-src')];
+    for (const s of video.querySelectorAll('source')) cands.push(s.getAttribute('src'), s.getAttribute('data-src'));
+    for (const c of cands) {
+      const u = absUrl(c, base);
+      if (u) return u;
+    }
+    return null;
+  }
+
   function postIdOf(post) {
     const s = `${post.id || ''} ${post.getAttribute('data-content') || ''}`;
     const m = s.match(/post-(\d+)/);
@@ -155,24 +173,36 @@
   function extractImages(doc, pageUrl, page) {
     const base = baseHref(doc, pageUrl);
     const host = new URL(pageUrl).host;
+    const live = doc === document;
     const found = [];
 
-    const add = (url, el, post, explicitName, img) => {
+    const add = (url, el, post, { name, img, type } = {}) => {
       if (!url) return;
       const att = parseAttachment(url);
       let sameHost = false;
       try { sameHost = new URL(url).host === host; } catch {}
-      found.push({
+      name = name || nameFromUrl(url);
+      type = type || (VIDEO_EXT.test(name || '') || isVideoUrl(url) ? 'video' : 'image');
+      const rec = {
         url,
         key: att && sameHost ? `att:${att.id}` : url,
-        orig: originalOf(url, img),
-        name: explicitName || nameFromUrl(url),
+        orig: img ? originalOf(url, img) : null,
+        name,
+        type,
         kind: att && sameHost ? 'attachment' : 'embed',
         page,
         post: postIdOf(post),
         quote: !!el.closest('.bbCodeBlock--quote, .bbCodeQuote, blockquote.quote'),
         sig: !!el.closest('.message-signature, .signature'),
-      });
+        w: null,
+        h: null,
+      };
+      // На открытой странице картинка уже загружена — размеры известны без запроса.
+      if (live && img && type === 'image' && img.complete && img.naturalWidth && img.currentSrc === url) {
+        rec.w = img.naturalWidth;
+        rec.h = img.naturalHeight;
+      }
+      found.push(rec);
     };
 
     let posts = [...doc.querySelectorAll('article.message, li.message, div.message')]
@@ -185,23 +215,56 @@
         '.message-body .bbWrapper, .message-signature .bbWrapper, .messageText, .signature'
       );
       for (const body of bodies) {
-        for (const img of body.querySelectorAll('img')) {
-          if (img.closest(SKIP_IMG)) continue;
-          add(bestImageUrl(img, base), img, post, null, img);
+        for (const el of body.querySelectorAll('img, video, a[href]')) {
+          if (el.tagName === 'IMG') {
+            if (!el.closest(SKIP_IMG)) add(bestImageUrl(el, base), el, post, { img: el });
+          } else if (el.tagName === 'VIDEO') {
+            add(videoUrl(el, base), el, post, { type: 'video' });
+          } else if (!el.querySelector('img')) {
+            // Обычная ссылка на видеофайл (в т.ч. на видео-вложение).
+            const href = absUrl(el.getAttribute('href'), base);
+            if (href && isVideoUrl(href)) add(href, el, post, { type: 'video' });
+          }
         }
       }
 
       // Список вложений под постом (XF2: .message-attachments, XF1: .attachedFiles).
-      for (const a of post.querySelectorAll('.message-attachments a.file-preview[href], .attachedFiles .thumbnail a[href]')) {
-        if (!a.querySelector('img')) continue; // не картинка (zip, pdf и т.п.)
+      for (const a of post.querySelectorAll('.message-attachments a.file-preview[href], .attachedFiles li.attachment a[href]')) {
         const li = a.closest('li');
-        const fn = li && (li.querySelector('.file-name')?.getAttribute('title') ||
-          li.querySelector('.file-name')?.textContent || li.getAttribute('title') ||
-          li.querySelector('.filename a')?.textContent);
-        add(absUrl(a.getAttribute('href'), base), a, post, fn ? fn.trim() : null, null);
+        const fnEl = li && li.querySelector('.file-name');
+        const fn = ((fnEl && (fnEl.getAttribute('title') || fnEl.textContent)) ||
+          (li && li.getAttribute('title')) || '').trim() || null;
+        const url = absUrl(a.getAttribute('href'), base);
+        const isVideo = !!a.querySelector('video') || VIDEO_EXT.test(fn || '') || (url && isVideoUrl(url));
+        if (isVideo) add(url, a, post, { name: fn, type: 'video' });
+        else if (a.querySelector('img')) add(url, a, post, { name: fn, type: 'image' });
+        // остальное (zip, pdf и т.п.) пропускаем
       }
     }
     return found;
+  }
+
+  // Узнаём размеры картинки, не скачивая её целиком: Chrome выставляет naturalWidth,
+  // как только прочитан заголовок файла, после чего загрузку можно оборвать.
+  function probeSize(url, timeout = 15000) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      let timer = null;
+      let poll = null;
+      const finish = (w, h) => {
+        clearTimeout(timer);
+        clearInterval(poll);
+        img.onload = img.onerror = null;
+        img.src = '';
+        resolve(w ? { w, h } : null);
+      };
+      img.onload = () => finish(img.naturalWidth, img.naturalHeight);
+      img.onerror = () => finish(0, 0);
+      timer = setTimeout(() => finish(img.naturalWidth, img.naturalHeight), timeout);
+      poll = setInterval(() => { if (img.naturalWidth) finish(img.naturalWidth, img.naturalHeight); }, 50);
+      img.referrerPolicy = 'strict-origin-when-cross-origin';
+      img.src = url;
+    });
   }
 
   async function fetchDoc(url) {
@@ -267,7 +330,7 @@
     const delay = Math.max(0, +opts.pageDelay || 0);
     const workers = Math.max(1, Math.min(4, +opts.pageConcurrency || 1));
 
-    send({ type: 'xfdl:scan-progress', meta, done, total: pages.length, found: 0 });
+    send({ type: 'xfdl:scan-progress', meta, phase: 'pages', done, total: pages.length, found: 0 });
 
     const queue = [...pages];
     const worker = async () => {
@@ -288,7 +351,7 @@
           if (!cancelled) errors.push({ page: p, error: String(e && e.message || e) });
         }
         done++;
-        send({ type: 'xfdl:scan-progress', meta, done, total: pages.length, found: foundCount });
+        send({ type: 'xfdl:scan-progress', meta, phase: 'pages', done, total: pages.length, found: foundCount });
       }
     };
 
@@ -306,7 +369,8 @@
             prev.quote = prev.quote && img.quote;
             prev.sig = prev.sig && img.sig;
             if (!prev.orig && img.orig) prev.orig = img.orig;
-            if (img.name && (!prev.name || !IMG_EXT.test(prev.name)) && IMG_EXT.test(img.name)) prev.name = img.name;
+            if (!prev.w && img.w) { prev.w = img.w; prev.h = img.h; }
+            if (img.name && (!prev.name || !hasMediaExt(prev.name)) && hasMediaExt(img.name)) prev.name = img.name;
             continue;
           }
           byKey.set(img.key, img);
@@ -314,11 +378,29 @@
         }
       }
 
+      // Размеры картинок — для фильтра мелких (смайлы, иконки, кнопки).
+      if (opts.probeSizes && !cancelled) {
+        const todo = images.filter((i) => i.type === 'image' && !i.w);
+        const q = [...todo];
+        let pd = 0;
+        const progress = () => send({ type: 'xfdl:scan-progress', meta, phase: 'sizes', done: pd, total: todo.length, found: images.length });
+        progress();
+        await Promise.all(Array.from({ length: 6 }, async () => {
+          while (q.length && !cancelled) {
+            const it = q.shift();
+            const size = await probeSize(it.url);
+            if (size) { it.w = size.w; it.h = size.h; }
+            pd++;
+            if (pd % 5 === 0 || pd === todo.length) progress();
+          }
+        }));
+      }
+
       send({
         type: 'xfdl:scan-done',
         meta,
         cancelled,
-        result: { images, pages: { from, to, total: last }, errors, scannedAt: Date.now() },
+        result: { images, pages: { from, to, total: last }, errors, sizesProbed: !!opts.probeSizes, scannedAt: Date.now() },
       });
     } catch (e) {
       send({ type: 'xfdl:scan-error', meta, error: String(e && e.message || e) });
@@ -328,6 +410,7 @@
   }
 
   window.__xfdl = {
+    version: VERSION,
     detect,
     scan,
     cancel() { cancelled = true; },

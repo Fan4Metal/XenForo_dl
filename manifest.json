@@ -2,10 +2,10 @@
   "manifest_version": 3,
   "name": "XenForo Thread Image Downloader",
   "short_name": "XF Images",
-  "version": "1.0.0",
-  "description": "Скачивает все изображения из текущего треда форума на XenForo (все страницы, вложения и встроенные картинки).",
+  "version": "1.1.0",
+  "description": "Скачивает все изображения из текущего треда форума на XenForo (все страницы, вложения, встроенные картинки и видео).",
   "minimum_chrome_version": "110",
-  "permissions": ["activeTab", "scripting", "downloads", "downloads.ui", "storage"],
+  "permissions": ["activeTab", "scripting", "downloads", "downloads.ui", "storage", "alarms"],
   "background": {
     "service_worker": "background.js"
   },

@@ -67,7 +67,7 @@ input[type=text], input[type=number] {
   padding: 3px 6px;
 }
 .num { width: 64px; }
-.radios .num { width: 58px; padding: 1px 4px; }
+.radios .num, .filters .num { width: 58px; padding: 1px 4px; }
 
 .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 button {

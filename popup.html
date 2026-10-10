@@ -38,10 +38,14 @@
 
   <section id="resultBox" class="card" hidden>
     <div class="filters">
-      <label><input type="checkbox" id="incAttach"> Вложения <span id="cAttach" class="count"></span></label>
-      <label><input type="checkbox" id="incEmbed"> Встроенные / внешние <span id="cEmbed" class="count"></span></label>
+      <label><input type="checkbox" id="incAttach"> Изображения-вложения <span id="cAttach" class="count"></span></label>
+      <label><input type="checkbox" id="incEmbed"> Встроенные / внешние изображения <span id="cEmbed" class="count"></span></label>
+      <label><input type="checkbox" id="incVideo"> Видео <span id="cVideo" class="count"></span></label>
       <label><input type="checkbox" id="incQuotes"> Из цитат <span id="cQuotes" class="count"></span></label>
       <label><input type="checkbox" id="incSigs"> Из подписей <span id="cSigs" class="count"></span></label>
+      <label><input type="checkbox" id="skipSmall"> Пропускать мелкие: меньше
+        <input type="number" id="minSize" min="1" step="10" class="num"> px по любой стороне
+        <span id="cSmall" class="count"></span></label>
     </div>
     <div id="total" class="total"></div>
     <div id="scanWarn" class="warn" hidden></div>
@@ -89,6 +93,7 @@
     </div>
   </details>
 
+  <script src="filter.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -2,8 +2,11 @@ const DEFAULTS = {
   range: 'all',
   incAttach: true,
   incEmbed: true,
+  incVideo: true,
   incQuotes: true,
   incSigs: false,
+  skipSmall: true,
+  minSize: 100,
   folder: 'XenForo',
   numbering: true,
   preferOriginal: false,
@@ -13,8 +16,8 @@ const DEFAULTS = {
   pageDelay: 300,
   pageConcurrency: 2,
 };
-const CHECKS = ['incAttach', 'incEmbed', 'incQuotes', 'incSigs', 'numbering', 'preferOriginal', 'hideUi', 'eraseHistory'];
-const NUMBERS = ['concurrency', 'pageDelay', 'pageConcurrency'];
+const CHECKS = ['incAttach', 'incEmbed', 'incVideo', 'incQuotes', 'incSigs', 'skipSmall', 'numbering', 'preferOriginal', 'hideUi', 'eraseHistory'];
+const NUMBERS = ['minSize', 'concurrency', 'pageDelay', 'pageConcurrency'];
 
 const $ = (id) => document.getElementById(id);
 let tab = null;
@@ -46,12 +49,14 @@ function readSettings() {
   return settings;
 }
 
-document.addEventListener('change', (e) => {
+const onInput = (e) => {
   if (e.target.matches('input')) {
     readSettings();
     renderScan();
   }
-});
+};
+document.addEventListener('change', onInput);
+$('minSize').addEventListener('input', onInput);
 
 // ---------- работа со вкладкой ----------
 
@@ -69,10 +74,7 @@ async function detect() {
 
 function selected() {
   if (!scan || !scan.result) return [];
-  return scan.result.images.filter((img) =>
-    (img.kind === 'attachment' ? settings.incAttach : settings.incEmbed) &&
-    (settings.incQuotes || !img.quote) &&
-    (settings.incSigs || !img.sig));
+  return scan.result.images.filter((img) => xfdlPasses(img, settings));
 }
 
 const plural = (n, one, few, many) => {
@@ -82,6 +84,7 @@ const plural = (n, one, few, many) => {
   return many;
 };
 const imgs = (n) => `${n} ${plural(n, 'изображение', 'изображения', 'изображений')}`;
+const vids = (n) => `${n} видео`;
 
 // ---------- отрисовка ----------
 
@@ -112,7 +115,9 @@ function renderScan() {
   if (scanning) {
     const pct = relevant.total ? (relevant.done / relevant.total) * 100 : 0;
     $('scanBar').style.width = `${pct}%`;
-    $('scanText').textContent = `Страниц: ${relevant.done} из ${relevant.total} · найдено ${relevant.found}`;
+    $('scanText').textContent = relevant.phase === 'sizes'
+      ? `Проверка размеров: ${relevant.done} из ${relevant.total}`
+      : `Страниц: ${relevant.done} из ${relevant.total} · найдено ${relevant.found}`;
   }
   $('scanError').hidden = !(relevant && relevant.status === 'error');
   if (relevant && relevant.status === 'error') $('scanError').textContent = relevant.error;
@@ -122,18 +127,26 @@ function renderScan() {
   if (!result) return;
 
   const all = result.images;
-  $('cAttach').textContent = `(${all.filter((i) => i.kind === 'attachment').length})`;
-  $('cEmbed').textContent = `(${all.filter((i) => i.kind !== 'attachment').length})`;
+  const pics = all.filter((i) => i.type !== 'video');
+  $('cAttach').textContent = `(${pics.filter((i) => i.kind === 'attachment').length})`;
+  $('cEmbed').textContent = `(${pics.filter((i) => i.kind !== 'attachment').length})`;
+  $('cVideo').textContent = `(${all.length - pics.length})`;
+  $('cSmall').textContent = result.sizesProbed ? `(${pics.filter((i) => xfdlIsSmall(i, settings.minSize)).length})` : '';
   $('cQuotes').textContent = `(${all.filter((i) => i.quote).length})`;
   $('cSigs').textContent = `(${all.filter((i) => i.sig).length})`;
 
-  const n = selected().length;
+  const sel = selected();
+  const n = sel.length;
+  const nv = sel.filter((i) => i.type === 'video').length;
   const pages = result.pages.from === result.pages.to
     ? `стр. ${result.pages.from}` : `стр. ${result.pages.from}–${result.pages.to}`;
-  $('total').textContent = `К загрузке: ${imgs(n)} (${pages})`;
+  $('total').textContent = `К загрузке: ${imgs(n - nv)}${nv ? `, ${vids(nv)}` : ''} (${pages})`;
 
   const warns = [];
   if (relevant.cancelled) warns.push('Сканирование было остановлено — список неполный.');
+  if (settings.skipSmall && !result.sizesProbed) {
+    warns.push('Размеры картинок не проверялись — пересканируйте, чтобы отсеять мелкие.');
+  }
   if (result.errors.length) {
     warns.push(`Не удалось загрузить страницы: ${result.errors.map((e) => e.page).join(', ')}.`);
   }
@@ -199,6 +212,7 @@ $('scanBtn').addEventListener('click', async () => {
     to: $('to').value,
     pageDelay: s.pageDelay,
     pageConcurrency: s.pageConcurrency,
+    probeSizes: s.skipSmall,
   };
   $('scanBtn').disabled = true;
   try {
@@ -267,6 +281,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 (async () => {
   await loadSettings();
   [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  chrome.runtime.sendMessage({ type: 'xfdl:ping' }).catch(() => {});
   const stored = await chrome.storage.session.get(['job', `scan:${tab.id}`]);
   job = stored.job || null;
   scan = stored[`scan:${tab.id}`] || null;
