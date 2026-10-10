@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>XenForo Image Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" width="20" height="20">
+    <h1>Изображения треда</h1>
+  </header>
+
+  <section id="thread" class="card">
+    <div id="threadTitle" class="title">Определение страницы…</div>
+    <div id="threadSub" class="muted"></div>
+  </section>
+
+  <section id="scanBox" class="card" hidden>
+    <div class="radios">
+      <label><input type="radio" name="range" value="all"> Все страницы</label>
+      <label><input type="radio" name="range" value="current"> Только текущая</label>
+      <label><input type="radio" name="range" value="custom"> Страницы
+        <input type="number" id="from" min="1" class="num"> –
+        <input type="number" id="to" min="1" class="num">
+      </label>
+    </div>
+    <div class="row">
+      <button id="scanBtn" class="primary">Сканировать</button>
+      <button id="scanStop" hidden>Стоп</button>
+    </div>
+    <div id="scanProgress" hidden>
+      <div class="bar"><div id="scanBar"></div></div>
+      <div id="scanText" class="muted"></div>
+    </div>
+    <div id="scanError" class="error" hidden></div>
+  </section>
+
+  <section id="resultBox" class="card" hidden>
+    <div class="filters">
+      <label><input type="checkbox" id="incAttach"> Вложения <span id="cAttach" class="count"></span></label>
+      <label><input type="checkbox" id="incEmbed"> Встроенные / внешние <span id="cEmbed" class="count"></span></label>
+      <label><input type="checkbox" id="incQuotes"> Из цитат <span id="cQuotes" class="count"></span></label>
+      <label><input type="checkbox" id="incSigs"> Из подписей <span id="cSigs" class="count"></span></label>
+    </div>
+    <div id="total" class="total"></div>
+    <div id="scanWarn" class="warn" hidden></div>
+    <div class="row">
+      <button id="dlBtn" class="primary">Скачать</button>
+      <button id="copyBtn" title="Скопировать список ссылок в буфер обмена">Копировать ссылки</button>
+    </div>
+  </section>
+
+  <section id="jobBox" class="card" hidden>
+    <div id="jobTitle" class="muted"></div>
+    <div class="bar"><div id="jobBar"></div></div>
+    <div id="jobText"></div>
+    <div class="row">
+      <button id="cancelBtn">Отмена</button>
+      <button id="retryBtn" hidden>Повторить ошибки</button>
+      <button id="showBtn" hidden>Открыть папку</button>
+      <button id="clearBtn" hidden>Скрыть</button>
+    </div>
+    <details id="failedBox" hidden>
+      <summary>Ошибки (<span id="failedCount"></span>)</summary>
+      <ul id="failedList"></ul>
+    </details>
+  </section>
+
+  <details id="settings" class="card">
+    <summary>Настройки</summary>
+    <label class="field">Папка в «Загрузках»
+      <input type="text" id="folder" placeholder="XenForo">
+    </label>
+    <label><input type="checkbox" id="numbering"> Нумеровать файлы по порядку в треде</label>
+    <label><input type="checkbox" id="preferOriginal"> Качать внешние картинки напрямую, а не через прокси форума</label>
+    <label><input type="checkbox" id="hideUi"> Скрывать панель загрузок Chrome во время скачивания</label>
+    <label><input type="checkbox" id="eraseHistory"> Удалять скачанное из списка загрузок Chrome</label>
+    <div class="grid">
+      <label class="field">Одновременных загрузок
+        <input type="number" id="concurrency" min="1" max="8" class="num">
+      </label>
+      <label class="field">Пауза между страницами, мс
+        <input type="number" id="pageDelay" min="0" step="100" class="num">
+      </label>
+      <label class="field">Страниц параллельно
+        <input type="number" id="pageConcurrency" min="1" max="4" class="num">
+      </label>
+    </div>
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>
